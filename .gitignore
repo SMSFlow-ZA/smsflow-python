@@ -1,10 +1,11 @@
 .env
 .env.*
 !.env.example
+.secrets/
 __pycache__/
 .pytest_cache/
 .venv/
-dist/
 build/
+dist/
 *.egg-info/
-*.pyc
+*.py[cod]

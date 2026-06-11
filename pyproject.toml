@@ -7,6 +7,24 @@ requires-python = ">=3.9"
 authors = [{ name = "SMSFlow" }]
 dependencies = ["requests>=2.31.0"]
 keywords = ["sms", "sms-api", "smsflow", "notifications"]
+license = "MIT"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Communications",
+  "Topic :: Software Development :: Libraries :: Python Modules"
+]
+
+[project.urls]
+Documentation = "https://docs.smsflow.co.za/"
+Repository = "https://github.com/SMSFlow-ZA/smsflow-python"
+Issues = "https://github.com/SMSFlow-ZA/smsflow-python/issues"
 
 [build-system]
 requires = ["setuptools>=68"]
