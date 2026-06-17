@@ -1,0 +1,32 @@
+name: Package smoke test
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Publish PyPI package"]
+    types: [completed]
+
+jobs:
+  smoke:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - id: package
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+          with open("pyproject.toml", "rb") as handle:
+              data = tomllib.load(handle)
+          print(f"version={data['project']['version']}")
+          PY
+      - run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install "smsflow==${{ steps.package.outputs.version }}"
+          python -c "from smsflow import SmsFlowClient; print(SmsFlowClient.__name__)"
+
