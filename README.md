@@ -34,6 +34,7 @@ from smsflow import SmsFlowClient
 client = SmsFlowClient(
     client_id=os.environ["SMSFLOW_CLIENT_ID"],
     client_secret=os.environ["SMSFLOW_CLIENT_SECRET"],
+    timeout=30,
 )
 
 response = client.send_sms(
@@ -71,31 +72,52 @@ print(balance["balance"])
 ## Error handling
 
 ```python
-from smsflow import SmsFlowError
+from smsflow import SmsFlowAuthenticationError, SmsFlowError, SmsFlowValidationError
 
 try:
     client.send_sms(
         campaign_name="Transactional SMS",
         messages=[{"destination": "27000000000", "content": "Hello from SMSFlow."}],
     )
+except SmsFlowAuthenticationError:
+    print("Check your SMSFlow Client ID and Client Secret.")
+    raise
+except SmsFlowValidationError as exc:
+    print("Fix the request before retrying.", exc.code, exc.body)
+    raise
 except SmsFlowError as exc:
-    print(exc.status_code, exc.body)
+    print(exc.status_code, exc.code, exc.retryable, exc.body)
     raise
 ```
 
 ## Timeouts and retries
 
-Set a timeout when constructing the client:
+Set a timeout and opt in to retry handling when your application can safely handle it:
 
 ```python
 client = SmsFlowClient(
     client_id=os.environ["SMSFLOW_CLIENT_ID"],
     client_secret=os.environ["SMSFLOW_CLIENT_SECRET"],
     timeout=30,
+    retry_retries=2,
+    retry_base_delay=0.25,
+    retry_max_delay=2.0,
+)
+
+balance = client.get_balance()  # Safe to retry temporary failures.
+
+client.send_sms(
+    campaign_name="Transactional SMS",
+    retry=True,  # Use only with your own idempotency or duplicate-send guard.
+    messages=[{"destination": "27000000000", "content": "Hello from SMSFlow."}],
 )
 ```
 
-Retry only temporary network failures and `5xx` responses. Do not retry validation errors, authentication failures, or insufficient-balance responses until the underlying issue has been fixed. Store the returned `eventId` against your own transaction or notification record.
+Retry only temporary network failures, `408`, `429`, and `5xx` responses. Do not retry validation errors, authentication failures, or insufficient-balance responses until the underlying issue has been fixed. Store the returned `eventId` against your own transaction or notification record.
+
+## Delivery status
+
+The public HTTPS API currently exposes authentication, send, and balance endpoints. Delivery-status helper methods will be added when a public delivery-status endpoint is available.
 
 ## Features
 
@@ -104,7 +126,8 @@ Retry only temporary network failures and `5xx` responses. Do not retry validati
 - Schedule SMS messages using UTC delivery time.
 - Respect opt-out checks by default.
 - Check account balance.
-- Raise structured exceptions when the API returns an error.
+- Raise typed structured exceptions when the API returns an error.
+- Configure timeouts and opt-in retries for temporary failures.
 
 ## Local test send
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from time import sleep
 from typing import Any, Iterable
 
 try:
@@ -11,10 +12,36 @@ except ImportError:  # pragma: no cover - exercised only when dependencies are n
 
 
 class SmsFlowError(Exception):
-    def __init__(self, message: str, *, status_code: int | None = None, body: Any = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        body: Any = None,
+        code: str = "SMSFLOW_ERROR",
+        retryable: bool = False,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.body = body
+        self.code = code
+        self.retryable = retryable
+
+
+class SmsFlowAuthenticationError(SmsFlowError):
+    pass
+
+
+class SmsFlowValidationError(SmsFlowError):
+    pass
+
+
+class SmsFlowServerError(SmsFlowError):
+    pass
+
+
+class SmsFlowNetworkError(SmsFlowError):
+    pass
 
 
 @dataclass
@@ -32,6 +59,9 @@ class SmsFlowClient:
         base_url: str = "https://portal.smsflow.co.za/",
         session: Any = None,
         timeout: int = 30,
+        retry_retries: int = 0,
+        retry_base_delay: float = 0.25,
+        retry_max_delay: float = 2.0,
     ) -> None:
         if not client_id or not client_secret:
             raise SmsFlowError("SMSFlow client_id and client_secret are required.")
@@ -44,18 +74,19 @@ class SmsFlowClient:
 
         self.session = session or requests.Session()
         self.timeout = timeout
+        self.retry_retries = retry_retries
+        self.retry_base_delay = retry_base_delay
+        self.retry_max_delay = retry_max_delay
         self._cached_auth: _CachedAuth | None = None
 
     def authenticate(self) -> dict[str, Any]:
-        response = self.session.get(
+        body = self._request(
+            "get",
             f"{self.base_url}/api/integration/authentication",
+            error_message="SMSFlow authentication failed.",
+            allow_retry=True,
             auth=(self.client_id, self.client_secret),
-            timeout=self.timeout,
         )
-        body = _read_body(response)
-
-        if not response.ok:
-            raise SmsFlowError("SMSFlow authentication failed.", status_code=response.status_code, body=body)
 
         token = body.get("token")
         expires_in = int(body.get("expiresInMinutes", 1))
@@ -75,13 +106,17 @@ class SmsFlowClient:
         messages: Iterable[dict[str, str]],
         start_delivery_utc: str | None = None,
         check_opt_outs: bool = True,
+        retry: bool = False,
     ) -> dict[str, Any]:
         message_list = list(messages)
         if not message_list:
-            raise SmsFlowError("At least one SMS message is required.")
+            raise SmsFlowValidationError("At least one SMS message is required.", code="MESSAGES_REQUIRED")
 
-        response = self.session.post(
+        return self._request(
+            "post",
             f"{self.base_url}/api/integration/BulkMessages",
+            error_message="SMSFlow send failed.",
+            allow_retry=retry,
             headers={"Authorization": f"Bearer {self._get_token()}"},
             json={
                 "SendOptions": {
@@ -97,27 +132,16 @@ class SmsFlowClient:
                     for message in message_list
                 ],
             },
-            timeout=self.timeout,
         )
-        body = _read_body(response)
-
-        if not response.ok:
-            raise SmsFlowError("SMSFlow send failed.", status_code=response.status_code, body=body)
-
-        return body
 
     def get_balance(self) -> dict[str, Any]:
-        response = self.session.get(
+        return self._request(
+            "get",
             f"{self.base_url}/api/integration/Balance",
+            error_message="SMSFlow balance request failed.",
+            allow_retry=True,
             headers={"Authorization": f"Bearer {self._get_token()}"},
-            timeout=self.timeout,
         )
-        body = _read_body(response)
-
-        if not response.ok:
-            raise SmsFlowError("SMSFlow balance request failed.", status_code=response.status_code, body=body)
-
-        return body
 
     def _get_token(self) -> str:
         if self._cached_auth and datetime.now(timezone.utc) < self._cached_auth.refresh_at:
@@ -125,6 +149,35 @@ class SmsFlowClient:
 
         auth = self.authenticate()
         return auth["token"]
+
+    def _request(self, method: str, url: str, *, error_message: str, allow_retry: bool, **kwargs: Any) -> Any:
+        attempts = (self.retry_retries + 1) if allow_retry else 1
+        last_error: SmsFlowError | None = None
+
+        for attempt in range(attempts):
+            try:
+                response = getattr(self.session, method)(url, timeout=self.timeout, **kwargs)
+            except Exception as exc:  # requests exceptions or compatible custom session exceptions.
+                error = SmsFlowNetworkError(
+                    "SMSFlow request failed before a response was received.",
+                    code="NETWORK_ERROR",
+                    retryable=True,
+                )
+                error.__cause__ = exc
+                last_error = error
+            else:
+                body = _read_body(response)
+                if response.ok:
+                    return body
+
+                last_error = _create_api_error(error_message, response.status_code, body)
+
+            if not last_error.retryable or attempt == attempts - 1:
+                raise last_error
+
+            sleep(_retry_delay_seconds(attempt, self.retry_base_delay, self.retry_max_delay))
+
+        raise SmsFlowError("SMSFlow request failed.")
 
 
 def _read_body(response: Any) -> Any:
@@ -135,3 +188,39 @@ def _read_body(response: Any) -> Any:
         return response.json()
     except ValueError:
         return response.text
+
+
+def _create_api_error(message: str, status_code: int, body: Any) -> SmsFlowError:
+    kwargs = {
+        "status_code": status_code,
+        "body": body,
+        "code": _error_code_from_body(body),
+        "retryable": _is_retryable_status(status_code),
+    }
+
+    if status_code == 401:
+        return SmsFlowAuthenticationError(message, **kwargs)
+
+    if 400 <= status_code < 500:
+        return SmsFlowValidationError(message, **kwargs)
+
+    return SmsFlowServerError(message, **kwargs)
+
+
+def _error_code_from_body(body: Any) -> str:
+    if isinstance(body, dict):
+        errors = body.get("errors")
+        if errors and isinstance(errors, list) and isinstance(errors[0], dict) and errors[0].get("code"):
+            return str(errors[0]["code"])
+        if body.get("code"):
+            return str(body["code"])
+
+    return "SMSFLOW_ERROR"
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code in (408, 429) or status_code >= 500
+
+
+def _retry_delay_seconds(attempt: int, base_delay: float, max_delay: float) -> float:
+    return min(base_delay * (2**attempt), max_delay)

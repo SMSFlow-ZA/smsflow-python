@@ -1,6 +1,6 @@
 [project]
 name = "smsflow"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python client library for the SMSFlow HTTPS API."
 readme = "README.md"
 requires-python = ">=3.9"
